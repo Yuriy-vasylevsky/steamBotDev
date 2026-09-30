@@ -81,3 +81,96 @@ cd /opt/steamSellDev
 chmod 600 .env
 bash deploy/start.sh
 ```
+
+## Перенесення бази даних зі старого бота
+
+Найпростіший спосіб — завантажити резервну копію через адмін-панель старого
+бота, передати файл на новий сервер через Termius і відновити його в
+PostgreSQL.
+
+> **Увага:** поточна база нового бота буде замінена даними з резервної копії.
+
+### 1. Завантажте резервну копію
+
+У старому боті завантажте файл із назвою приблизно такого вигляду:
+
+```text
+steamsell-backup-2026-09-30_12-00-00.dump
+```
+
+Для зручності перейменуйте його на:
+
+```text
+backup.dump
+```
+
+### 2. Передайте файл на новий сервер
+
+Через SFTP у Termius завантажте `backup.dump` у папку:
+
+```text
+/opt/steamSellDev/backup.dump
+```
+
+### 3. Перевірте ключ шифрування
+
+На новому сервері повинен використовуватися той самий `ENCRYPTION_KEY`, що й
+у старого бота. Інакше перенесені Gmail-дані та інші зашифровані значення не
+вдасться прочитати.
+
+```bash
+cd /opt/steamSellDev
+nano .env
+```
+
+Після перевірки збережіть файл: **Ctrl+O**, **Enter**, потім **Ctrl+X**.
+
+### 4. Відновіть базу і запустіть бота
+
+Виконайте весь блок команд:
+
+```bash
+cd /opt/steamSellDev
+
+docker compose -p steamsell stop app
+docker compose -p steamsell up -d db redis
+
+docker compose -p steamsell cp \
+  backup.dump \
+  db:/tmp/backup.dump
+
+docker compose -p steamsell exec -T db \
+  pg_restore \
+  -U steamsell \
+  -d steamsell \
+  --clean \
+  --if-exists \
+  --no-owner \
+  /tmp/backup.dump
+
+bash deploy/start.sh
+```
+
+### 5. Перевірте результат
+
+```bash
+docker compose -p steamsell ps
+docker compose -p steamsell logs --tail=100 app
+```
+
+Контейнер `app` повинен мати статус `Up` і `healthy`.
+
+### 6. Видаліть тимчасові копії
+
+Після успішної перевірки:
+
+```bash
+rm -f /opt/steamSellDev/backup.dump
+
+docker compose -p steamsell exec -T db \
+  rm -f /tmp/backup.dump
+```
+
+Якщо старий і новий сервери використовують однаковий `BOT_TOKEN`, не
+запускайте старого бота після перенесення. Два екземпляри Telegram-бота з одним
+токеном конфліктуватимуть між собою.

@@ -50,7 +50,7 @@ from app.services import (
 )
 from app.ui import (
     back,
-    code_timer_alert,
+    code_confirmation_text,
     copy_card_rows,
     discounted_price_text,
     home_rows,
@@ -2107,9 +2107,7 @@ def create_dispatcher(shop, storage):
             ),
         )
 
-    @router.callback_query(F.data.regexp(r"^code:[a-f0-9]{32}(?::\d+)?$"))
-    async def code(callback, session, shop, user, lang):
-        _, order_id, *source = callback.data.split(":")
+    async def deliver_code(callback, session, shop, user, lang, order_id, source):
         purchase_target = f"purchase:{order_id}:{source[0]}" if source else f"purchase:{order_id}"
         try:
             code, reused = await shop.code(user.id, order_id)
@@ -2131,15 +2129,6 @@ def create_dispatcher(shop, storage):
             parse_mode="HTML",
             protect_content=True,
         )
-        order = await session.get(Order, order_id)
-        product = await session.get(Product, order.product_id) if order else None
-        if product and product.code_window_hours:
-            code_limit = await effective_code_limit(session, product)
-            if code_limit >= 2:
-                await callback.answer(
-                    code_timer_alert(product.code_window_hours, lang),
-                    show_alert=True,
-                )
         await render(
             callback,
             "✅ Код надіслано окремим повідомленням і він залишиться в чаті."
@@ -2147,6 +2136,36 @@ def create_dispatcher(shop, storage):
             else "✅ Код отправлен отдельным сообщением и останется в чате.",
             [back(lang, purchase_target)],
         )
+
+    @router.callback_query(F.data.regexp(r"^code:[a-f0-9]{32}(?::\d+)?$"))
+    async def code(callback, session, shop, user, lang):
+        _, order_id, *source = callback.data.split(":")
+        purchase_target = f"purchase:{order_id}:{source[0]}" if source else f"purchase:{order_id}"
+        order = await session.get(Order, order_id)
+        product = (
+            await session.get(Product, order.product_id)
+            if order and order.user_id == user.id and order.status in SUCCESS
+            else None
+        )
+        if product:
+            code_limit = await effective_code_limit(session, product)
+            if code_limit >= 2 and product.code_window_hours:
+                confirm_target = f"code_confirm:{order_id}" + (f":{source[0]}" if source else "")
+                await render(
+                    callback,
+                    code_confirmation_text(product.code_window_hours, lang),
+                    [
+                        [("✅ Підтвердити й отримати код" if lang == "ua" else "✅ Подтвердить и получить код", confirm_target)],
+                        [("❌ Скасувати" if lang == "ua" else "❌ Отменить", purchase_target)],
+                    ],
+                )
+                return
+        await deliver_code(callback, session, shop, user, lang, order_id, source)
+
+    @router.callback_query(F.data.regexp(r"^code_confirm:[a-f0-9]{32}(?::\d+)?$"))
+    async def confirm_code(callback, session, shop, user, lang):
+        _, order_id, *source = callback.data.split(":")
+        await deliver_code(callback, session, shop, user, lang, order_id, source)
 
     @router.message(ReviewForm.text)
     async def save_review(message, state, session, user, lang):

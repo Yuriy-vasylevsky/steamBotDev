@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from app.i18n import tr
-from app.ui import code_timer_alert, home_rows, persistent_menu, purchase_rows
+from app.ui import code_confirmation_text, home_rows, persistent_menu, purchase_rows
 
 
 def test_home_inline_menu_has_only_catalog_sections():
@@ -92,6 +92,11 @@ def test_expired_code_window_hides_next_code_button_in_both_languages():
         assert all(target != "noop" for row in rows for _, target in row)
 
 
-def test_code_timer_alert_is_localized():
-    assert code_timer_alert(12, "ua") == "⏳ Код активний протягом 12 год. Таймер уже запущено."
-    assert code_timer_alert(12, "ru") == "⏳ Код активен в течение 12 ч. Таймер уже запущен."
+def test_code_confirmation_text_is_localized_and_shows_timer():
+    ua = code_confirmation_text(12, "ua")
+    ru = code_confirmation_text(12, "ru")
+
+    assert "Підтвердіть" in ua
+    assert "протягом 12 год." in ua
+    assert "Подтвердите" in ru
+    assert "в течение 12 ч." in ru

@@ -141,10 +141,18 @@ def aware_datetime(value):
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
-def code_timer_alert(hours, lang):
+def code_confirmation_text(hours, lang):
     if lang == "ua":
-        return f"⏳ Код активний протягом {hours} год. Таймер уже запущено."
-    return f"⏳ Код активен в течение {hours} ч. Таймер уже запущен."
+        return (
+            "Підтвердіть, коли будете готові одразу ввести код, або скасуйте запит.\n\n"
+            f"⏳ Решту кодів можна отримати протягом {hours} год. "
+            "після отримання першого коду."
+        )
+    return (
+        "Подтвердите, когда будете готовы сразу ввести код, или отмените запрос.\n\n"
+        f"⏳ Остальные коды можно получить в течение {hours} ч. "
+        "после получения первого кода."
+    )
 
 
 def purchase_text(order, product, lang, vault):
