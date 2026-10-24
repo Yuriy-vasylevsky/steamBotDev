@@ -106,10 +106,11 @@ backup.dump
 
 ### 2. Передайте файл на новий сервер
 
-Через SFTP у Termius завантажте `backup.dump` у папку:
+У Termius підключіться до сервера `178.104.227.21` під користувачем `root`.
+Через SFTP завантажте `backup.dump` у корінь папки бота:
 
 ```text
-/opt/steamSellDev/backup.dump
+/root/steambot/backup.dump
 ```
 
 ### 3. Перевірте ключ шифрування
@@ -119,7 +120,7 @@ backup.dump
 вдасться прочитати.
 
 ```bash
-cd /opt/steamSellDev
+cd /root/steambot
 nano .env
 ```
 
@@ -127,29 +128,25 @@ nano .env
 
 ### 4. Відновіть базу і запустіть бота
 
-Виконайте весь блок команд:
+Виконуйте команди **по одній**, переходячи до наступної лише тоді, коли
+попередня завершилася без помилки:
 
 ```bash
-cd /opt/steamSellDev
+cd /root/steambot
 
-docker compose -p steamsell stop app
+docker compose -p steamsell stop app backup
 docker compose -p steamsell up -d db redis
-
-docker compose -p steamsell cp \
-  backup.dump \
-  db:/tmp/backup.dump
-
-docker compose -p steamsell exec -T db \
-  pg_restore \
-  -U steamsell \
-  -d steamsell \
-  --clean \
-  --if-exists \
-  --no-owner \
-  /tmp/backup.dump
-
+docker compose -p steamsell cp backup.dump db:/tmp/backup.dump
+docker compose -p steamsell exec -T db pg_restore --list /tmp/backup.dump
+docker compose -p steamsell exec -T db dropdb -U steamsell --if-exists --force steamsell
+docker compose -p steamsell exec -T db createdb -U steamsell -O steamsell steamsell
+docker compose -p steamsell exec -T db pg_restore -U steamsell -d steamsell -O -x -e /tmp/backup.dump
 bash deploy/start.sh
 ```
+
+Команда `pg_restore --list` перевіряє, що файл є справною резервною копією.
+Якщо вона повернула помилку, не виконуйте наступні команди: повторно завантажте
+`backup.dump` на сервер.
 
 ### 5. Перевірте результат
 
@@ -165,10 +162,8 @@ docker compose -p steamsell logs --tail=100 app
 Після успішної перевірки:
 
 ```bash
-rm -f /opt/steamSellDev/backup.dump
-
-docker compose -p steamsell exec -T db \
-  rm -f /tmp/backup.dump
+rm -f /root/steambot/backup.dump
+docker compose -p steamsell exec -T db rm -f /tmp/backup.dump
 ```
 
 Якщо старий і новий сервери використовують однаковий `BOT_TOKEN`, не

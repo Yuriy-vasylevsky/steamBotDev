@@ -128,6 +128,38 @@ async def test_admin_button_is_not_shown_in_home_inline_menu(shop):
     assert all(button.callback_data != "a:home" for row in admin_markup.inline_keyboard for button in row)
 
 
+async def test_home_shows_all_selected_products_and_product_returns_to_source(shop):
+    async with shop.sessions() as session, session.begin():
+        for index in range(2, 10):
+            session.add(Product(
+                id=index, name_ua=f"Game {index}", name_ru=f"Game {index}",
+                price=10000, on_home=True, featured_position=10 - index,
+            ))
+        session.add(Product(name_ua="Hidden", name_ru="Hidden", price=10000,
+                            on_home=True, visible=False))
+        session.add(Product(name_ua="Sold out", name_ru="Sold out", price=10000,
+                            on_home=True, stock_quantity=0))
+
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+
+    await dp.feed_update(bot, update(callback="home"))
+    markup = bot.session.call_args.args[1].reply_markup
+    products = [button.callback_data for row in markup.inline_keyboard for button in row
+                if button.callback_data.startswith("product:")]
+    assert products == [f"product:{index}:home" for index in range(9, 1, -1)]
+
+    for source, target in [(products[0], "home"), ("product:2:catalog:1", "catalog:1"),
+                           ("product:2:featured:0", "featured:0"),
+                           ("product:2", "catalog:0")]:
+        await dp.feed_update(bot, update(callback=source))
+        markup = bot.session.call_args.args[1].reply_markup
+        assert markup.inline_keyboard[-1][0].callback_data == target
+    await storage.close()
+
+
 async def test_cart_item_removal_requires_confirmation(shop):
     async with shop.sessions() as session, session.begin():
         session.add(CartItem(user_id=1, product_id=1))

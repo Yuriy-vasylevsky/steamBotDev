@@ -309,14 +309,13 @@ def create_dispatcher(shop, storage):
                     or_(Product.stock_quantity.is_(None), Product.stock_quantity > 0),
                 )
                 .order_by(Product.featured_position, Product.id)
-                .limit(5)
             )
         ).all()
         rows += [
             [
                 (
                     getattr(p, "name_" + lang),
-                    f"product:{p.id}",
+                    f"product:{p.id}:home",
                 )
             ]
             for p in products
@@ -1071,7 +1070,7 @@ def create_dispatcher(shop, storage):
         )
 
     @router.callback_query(
-        F.data.regexp(r"^product:\d+(?::(?:catalog|featured):\d+|:search:(?:catalog|featured):\d+)?$")
+        F.data.regexp(r"^product:\d+(?::home|:(?:catalog|featured):\d+|:search:(?:catalog|featured):\d+)?$")
     )
     async def product(callback, state, session, lang, user):
         parts = callback.data.split(":")
@@ -1085,7 +1084,7 @@ def create_dispatcher(shop, storage):
             return_target = f"{parts[2]}:{parts[3]}"
         else:
             await state.clear()
-            return_target = "catalog:0"
+            return_target = "home" if parts[2:] == ["home"] else "catalog:0"
         discount = await active_discount_percent(session, user.id)
         in_cart = await session.get(CartItem, (user.id, p.id)) is not None
         cart_count = await session.scalar(
