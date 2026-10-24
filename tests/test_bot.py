@@ -59,7 +59,8 @@ async def test_receipt_example_can_be_managed_and_is_shown_before_instructions(s
 
     await dp.feed_update(bot, update(user_id=99, callback="a:settings"))
     menu_markup = bot.session.call_args.args[1].reply_markup
-    assert all(len(row) == 2 for row in menu_markup.inline_keyboard[:-1])
+    assert all(len(row) == 2 for row in menu_markup.inline_keyboard[:-2])
+    assert 1 <= len(menu_markup.inline_keyboard[-2]) <= 2
     assert len(menu_markup.inline_keyboard[-1]) == 1
 
     await dp.feed_update(bot, update(user_id=99, callback="a:receipt_example_settings"))
@@ -160,6 +161,104 @@ async def test_home_shows_all_selected_products_and_product_returns_to_source(sh
     await storage.close()
 
 
+async def test_newsletter_defaults_to_subscribed_and_can_be_disabled_in_account(shop):
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+    await dp.feed_update(bot, update(callback="account"))
+    markup = bot.session.call_args.args[1].reply_markup
+    assert "Відписатися" in markup.inline_keyboard[0][0].text
+    await dp.feed_update(bot, update(callback="account:newsletter"))
+    async with shop.sessions() as session:
+        assert (await session.get(User, 1)).broadcast_subscribed is False
+    await dp.feed_update(bot, update(callback="home"))
+    async with shop.sessions() as session:
+        assert (await session.get(User, 1)).broadcast_subscribed is False
+    await storage.close()
+
+
+async def test_reviews_and_thanks_are_in_information_menu(shop):
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+    moved = {"account:reviews:0", "account:admin_thanks"}
+    await dp.feed_update(bot, update(callback="account"))
+    markup = bot.session.call_args.args[1].reply_markup
+    assert not moved.intersection(b.callback_data for row in markup.inline_keyboard for b in row)
+    for event in (update(text="ℹ️ Інфо. та відгуки"), update(callback="info")):
+        await dp.feed_update(bot, event)
+        markup = bot.session.call_args.args[1].reply_markup
+        assert moved.issubset(b.callback_data for row in markup.inline_keyboard for b in row)
+    for target in moved:
+        await dp.feed_update(bot, update(callback=target))
+        markup = bot.session.call_args.args[1].reply_markup
+        assert markup.inline_keyboard[-1][0].callback_data == "info"
+    await storage.close()
+
+
+async def test_only_purchase_cards_include_reviews_and_thanks(shop):
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+    async with shop.sessions() as session, session.begin():
+        (await session.get(Order, "a" * 32)).status = "paid"
+    for target in ("product:1:home", "purchase:" + "a" * 32 + ":0"):
+        await dp.feed_update(bot, update(callback=target))
+        markup = bot.session.call_args.args[1].reply_markup
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        links = {"account:reviews:0", "account:admin_thanks"}
+        if target.startswith("purchase:"):
+            assert links.issubset(callbacks)
+        else:
+            assert not links.intersection(callbacks)
+    await storage.close()
+
+
+async def test_payment_file_can_be_sent_for_manual_review(shop):
+    async with shop.sessions() as session, session.begin():
+        (await session.get(Order, "a" * 32)).payment_method = "receipt"
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+    await dp.feed_update(bot, update(callback="receipt:" + "a" * 32))
+    payload = update().model_dump()
+    payload["message"]["document"] = {"file_id": "receipt-document", "file_unique_id": "document-unique"}
+    await dp.feed_update(bot, Update.model_validate(payload))
+    method = bot.session.call_args.args[1]
+    assert "Не вдалося розпізнати" in method.text
+    target = method.reply_markup.inline_keyboard[0][0].callback_data
+    await dp.feed_update(bot, update(callback=target))
+    async with shop.sessions() as session:
+        receipt = await session.scalar(select(PaymentReceipt))
+        assert receipt.status == "manual_review"
+    assert any(type(call.args[1]).__name__ == "SendDocument" for call in bot.session.call_args_list)
+    await storage.close()
+
+
+async def test_database_upload_requires_primary_admin_and_confirmation(shop):
+    storage = MemoryStorage()
+    dp = create_dispatcher(shop, storage)
+    bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    bot.session = AsyncMock()
+    await dp.feed_update(bot, update(user_id=99, callback="a:settings"))
+    markup = bot.session.call_args.args[1].reply_markup
+    assert any(b.callback_data == "a:upload_database" for row in markup.inline_keyboard for b in row)
+    await dp.feed_update(bot, update(user_id=99, callback="a:upload_database"))
+    assert "замінить усі поточні дані" in bot.session.call_args.args[1].text
+    await dp.feed_update(bot, update(user_id=99, callback="a:restore_cancel"))
+    await dp.feed_update(bot, update(user_id=99, callback="a:restore_confirm:old"))
+    assert "застаріло" in bot.session.call_args.args[1].text
+    async with shop.sessions() as session, session.begin():
+        (await session.get(User, 2)).is_admin = True
+    await dp.feed_update(bot, update(user_id=2, callback="a:upload_database"))
+    assert "лише головному" in bot.session.call_args.args[1].text
+    await storage.close()
+
+
 async def test_cart_item_removal_requires_confirmation(shop):
     async with shop.sessions() as session, session.begin():
         session.add(CartItem(user_id=1, product_id=1))
@@ -205,25 +304,25 @@ async def test_additional_admin_can_open_panel(shop):
     assert "Керування" in bot.session.call_args.args[1].text
 
 
-async def test_admin_recent_orders_are_available_from_general_settings(shop):
+async def test_admin_recent_orders_show_only_paid_orders(shop):
+    async with shop.sessions() as session, session.begin():
+        (await session.get(Order, "a" * 32)).status = "paid"
+        for index, status in enumerate(("waiting_payment", "cancelled", "payment_failed", "delivered"), 1):
+            session.add(Order(
+                id=str(index) * 32, user_id=1, product_id=1,
+                price_snapshot=10000, product_name_snapshot=f"Order {status}", status=status,
+            ))
     dp = create_dispatcher(shop, MemoryStorage())
     bot = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
     bot.session = AsyncMock()
 
-    await dp.feed_update(bot, update(user_id=99, callback="a:general_settings"))
-    markup = bot.session.call_args.args[1].reply_markup
-    recent_button = next(
-        button
-        for row in markup.inline_keyboard
-        for button in row
-        if button.callback_data == "a:recent_orders:today:0"
-    )
-    assert recent_button.text == "🧾 Історія замовлень"
-
-    await dp.feed_update(bot, update(user_id=99, callback="a:recent_orders:today:0"))
+    await dp.feed_update(bot, update(user_id=99, text="🧾 Історія замовлень"))
     method = bot.session.call_args.args[1]
     assert "Історія замовлень" in method.text
     assert "Original" in method.text
+    assert "Order delivered" in method.text
+    for status in ("waiting_payment", "cancelled", "payment_failed"):
+        assert f"Order {status}" not in method.text
     assert "#aaaaaaaa" not in method.text
     assert "ID: 1" in method.text
     assert "499" in method.text

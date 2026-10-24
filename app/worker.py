@@ -6,17 +6,18 @@ from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import MessageEntity
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.access import all_admin_ids, is_admin
 from app.i18n import money, tr
 from app.mailboxes import effective_code_limit
-from app.models import Broadcast, Order, Product, PromoCode, User, now
+from app.models import Broadcast, Order, PaymentReceipt, Product, PromoCode, User, now
 from app.services import (
     aware,
     cleanup_expired_promo_codes,
     code_request_window_open,
     setting,
+    release_checkout,
 )
 from app.ui import (
     back,
@@ -256,16 +257,48 @@ async def broadcast_batch(shop, bot):
             )
 
 
+async def expire_receipt_reviews(shop, bot):
+    notifications = []
+    async with shop.sessions() as session, session.begin():
+        receipts = (await session.scalars(
+            select(PaymentReceipt).where(
+                PaymentReceipt.status.in_(("manual_review", "retry_allowed_review")),
+                func.coalesce(PaymentReceipt.manual_review_at, PaymentReceipt.created_at) <= now() - timedelta(hours=24),
+            ).order_by(PaymentReceipt.id).limit(50).with_for_update(skip_locked=True)
+        )).all()
+        for receipt in receipts:
+            order = await session.get(Order, receipt.order_id, with_for_update=True)
+            receipt.status = "rejected"
+            receipt.reviewed_at = now()
+            receipt.reason = "Автоматично відхилено: минуло 24 години перевірки адміністратором."
+            if order and order.status == "waiting_payment":
+                await release_checkout(session, order, "cancelled")
+                user = await session.get(User, receipt.user_id)
+                notifications.append((receipt.user_id, user.language if user else "ua"))
+    for user_id, lang in notifications:
+        try:
+            await bot.send_message(user_id,
+                "❌ Заявку на перевірку оплати автоматично відхилено: минуло 24 години без рішення адміністратора. Ви можете створити нову покупку."
+                if lang != "ru" else
+                "❌ Заявка на проверку оплаты автоматически отклонена: прошло 24 часа без решения администратора. Вы можете создать новую покупку.")
+        except Exception:
+            log.warning("receipt_timeout_notification_failed user=%s", user_id)
+
+
 async def worker(shop, bot):
     iteration = 0
     while True:
         try:
+            if getattr(shop, "database_restoring", False):
+                await asyncio.sleep(2)
+                continue
             for _ in range(20):
                 if not await deliver_one(shop, bot):
                     break
             await notify_admin(shop, bot)
             await broadcast_batch(shop, bot)
             if iteration % 30 == 0:
+                await expire_receipt_reviews(shop, bot)
                 await shop.reconcile()
                 async with shop.sessions() as session, session.begin():
                     deleted_promos = await cleanup_expired_promo_codes(session)

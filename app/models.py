@@ -23,7 +23,7 @@ class User(Base):
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     access_blocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    broadcast_subscribed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    broadcast_subscribed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
@@ -202,6 +202,7 @@ class PaymentReceipt(Base):
     reviewed_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manual_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AdminLog(Base):

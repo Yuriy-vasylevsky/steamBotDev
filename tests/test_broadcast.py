@@ -8,7 +8,8 @@ from app.worker import broadcast_batch
 
 async def test_broadcast_is_sent_only_to_subscribed_users(shop):
     async with shop.sessions() as session, session.begin():
-        (await session.get(User, 1)).broadcast_subscribed = True
+        assert (await session.get(User, 1)).broadcast_subscribed is True
+        (await session.get(User, 2)).broadcast_subscribed = False
         session.add(
             Broadcast(payload={"text": "News", "photo": None, "entities": []})
         )

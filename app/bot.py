@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import hashlib
 from contextlib import suppress
 from datetime import datetime, timedelta
 from html import escape
@@ -167,6 +168,10 @@ async def animate_mono_payment(message):
 
 
 async def send_receipt_for_admin_review(bot, shop, receipt, order, user, reason):
+    async with shop.sessions() as timer_session, timer_session.begin():
+        pending = await timer_session.get(PaymentReceipt, receipt.id, with_for_update=True)
+        if pending and pending.status in {"manual_review", "retry_allowed_review"} and not pending.manual_review_at:
+            pending.manual_review_at = now()
     caption = (
         f"🧾 Ручна перевірка скріну\n{escape(order.product_name_snapshot)}\n"
         f"💰 До сплати: <b>{money(payment_total(order))}</b>\n"
@@ -176,7 +181,10 @@ async def send_receipt_for_admin_review(bot, shop, receipt, order, user, reason)
         recipients = await all_admin_ids(admin_session, shop.cfg)
     for admin_id in recipients:
         try:
-            await bot.send_photo(
+            media_type = (receipt.analysis or {}).get("upload_type", "photo")
+            sender = {"photo": bot.send_photo, "document": bot.send_document,
+                      "animation": bot.send_animation, "video": bot.send_video}.get(media_type, bot.send_document)
+            await sender(
                 admin_id,
                 receipt.telegram_file_id,
                 caption=caption,
@@ -233,6 +241,9 @@ class ContextMiddleware(BaseMiddleware):
         actor = event.from_user
         message = event.message if isinstance(event, CallbackQuery) else event
         if not actor or not isinstance(message, Message) or message.chat.type != "private":
+            return
+        if getattr(self.shop, "database_restoring", False):
+            await message.answer("Відновлення бази даних. Спробуйте за кілька хвилин.\nВосстановление базы данных. Попробуйте через несколько минут.")
             return
         async with self.shop.sessions() as session:
             user = await session.get(User, actor.id)
@@ -352,7 +363,7 @@ def create_dispatcher(shop, storage):
             ],
         )
 
-    def account_rows(lang, subscribed, loyalty_enabled, reviews_enabled):
+    def account_rows(lang, subscribed, loyalty_enabled):
         newsletter = (
             "🔕 Відписатися від розсилки"
             if subscribed and lang == "ua"
@@ -365,7 +376,7 @@ def create_dispatcher(shop, storage):
         rows = [
             [(newsletter, "account:newsletter")],
             [(tr("loyalty", lang), "account:loyalty")],
-            [("🎁 Мої промокоди" if lang == "ua" else "🎁 Мои промокоды", "account:promos")],
+            [("🎟 Мої промокоди" if lang == "ua" else "🎟 Мои промокоды", "account:promos")],
             [
                 (
                     "👥 Реферальна програма" if lang == "ua" else "👥 Реферальная программа",
@@ -373,16 +384,30 @@ def create_dispatcher(shop, storage):
                 )
             ],
             [(tr("language", lang), "account:language")],
-            [(tr("admin_thanks", lang), "account:admin_thanks")],
         ]
-        if reviews_enabled:
-            rows[4].append((tr("review", lang), "account:reviews:0"))
         rows.append(back(lang))
+        return rows
+
+    async def information_rows(session, lang):
+        rows = [
+            [(tr("activation_guide", lang), "activation_guide")],
+            [(tr("faq", lang), "faq")],
+        ]
+        rows.extend(await reviews_and_thanks_rows(session, lang))
+        buttons = [button for row in rows for button in row]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+        rows.append(back(lang))
+        return rows
+
+    async def reviews_and_thanks_rows(session, lang, purchase=False):
+        rows = []
+        if await setting(session, "reviews_enabled", "true") == "true":
+            rows.append([(tr("leave_review" if purchase else "review", lang), "account:reviews:0")])
+        rows.append([(tr("admin_thanks", lang), "account:admin_thanks")])
         return rows
 
     async def show_account(event, session, user, lang):
         loyalty = await loyalty_status(session, user.id)
-        reviews_enabled = await setting(session, "reviews_enabled", "true") == "true"
         profile_name = user.first_name or ("@" + user.username if user.username else "—")
         title = "МІЙ КАБІНЕТ" if lang == "ua" else "МОЙ КАБИНЕТ"
         user_label = "Ім'я" if lang == "ua" else "Имя"
@@ -399,7 +424,7 @@ def create_dispatcher(shop, storage):
         await render(
             event,
             text,
-            account_rows(lang, user.broadcast_subscribed, loyalty["enabled"], reviews_enabled),
+            account_rows(lang, user.broadcast_subscribed, loyalty["enabled"]),
         )
 
     async def show_loyalty(event, session, user, lang):
@@ -574,7 +599,7 @@ def create_dispatcher(shop, storage):
             rows.append(pagination("account:reviews", page, total, 7))
         if user and await review_slots(session, user.id):
             rows.append([(tr("leave_review", lang), "account:review")])
-        rows.append(back(lang, "account"))
+        rows.append(back(lang, "info"))
         text = tr("reviews_title", lang) + "\n\n"
         text += f"{tr('reviews_total', lang)}: <b>{total}</b>" if items else tr("reviews_empty", lang)
         await render(event, text, rows)
@@ -716,7 +741,7 @@ def create_dispatcher(shop, storage):
             )
         ).all()
         if not cards:
-            await render(callback, tr("admin_thanks_unavailable", lang), [back(lang, "account")])
+            await render(callback, tr("admin_thanks_unavailable", lang), [back(lang, "info")])
             return
         card_text = "\n".join(
             f"<b>{escape(card.label)}:</b> <code>{escape(shop.vault.decrypt(card.number_encrypted))}</code>"
@@ -726,7 +751,7 @@ def create_dispatcher(shop, storage):
             callback,
             tr("admin_thanks_text", lang) + "\n\n" + card_text,
             copy_card_rows([shop.vault.decrypt(card.number_encrypted) for card in cards], lang)
-            + [back(lang, "account")],
+            + [back(lang, "info")],
         )
 
     @router.callback_query(F.data.startswith("lang:"))
@@ -801,6 +826,10 @@ def create_dispatcher(shop, storage):
             "📨 Подписаться на рассылку": "newsletter",
             "🔕 Відписатися від розсилки": "newsletter",
             "🔕 Отписаться от рассылки": "newsletter",
+            "ℹ️ Інформація": "info",
+            "ℹ️ Информация": "info",
+            "ℹ️ Інформація та відгуки": "info",
+            "ℹ️ Информация и отзывы": "info",
         }
     )
 
@@ -839,11 +868,7 @@ def create_dispatcher(shop, storage):
             )
             rows = [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))], back(lang)]
             if action == "info":
-                rows = [
-                    [(tr("activation_guide", lang), "activation_guide")],
-                    [(tr("faq", lang), "faq")],
-                    back(lang),
-                ]
+                rows = await information_rows(session, lang)
             await render(message, escape(text), rows)
             return
         size = int(await setting(session, "page_size", str(shop.cfg.page_size)))
@@ -901,11 +926,7 @@ def create_dispatcher(shop, storage):
         )
         rows = [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))], back(lang)]
         if callback.data == "info":
-            rows = [
-                [(tr("activation_guide", lang), "activation_guide")],
-                [(tr("faq", lang), "faq")],
-                back(lang),
-            ]
+            rows = await information_rows(session, lang)
         await render(callback, escape(text), rows)
 
     @router.callback_query(
@@ -1758,7 +1779,8 @@ def create_dispatcher(shop, storage):
         await send_receipt_for_admin_review(callback.bot, shop, receipt, order, user, reason)
         await render(
             callback,
-            "🧑‍💻 Квитанцію та причину відмови передано адміністратору. Очікуйте рішення.",
+            "🧑‍💻 Передано адміністратору. Очікуйте рішення." if lang == "ua"
+            else "🧑‍💻 Передано администратору. Ожидайте решения.",
             [back(lang)],
         )
 
@@ -1774,7 +1796,39 @@ def create_dispatcher(shop, storage):
     async def receipt_photo(message, state, shop, user, lang):
         order_id = (await state.get_data()).get("receipt_order_id")
         if not message.photo:
-            await message.answer("Надішліть скриншот саме як фото або /cancel.")
+            media_type = next((kind for kind in ("animation", "document", "video")
+                               if getattr(message, kind, None)), None)
+            if not media_type:
+                await message.answer("Не вдалося розпізнати скриншот. Надішліть фото або файл."
+                                     if lang == "ua" else "Не удалось распознать скрин. Отправьте фото или файл.")
+                return
+            media = getattr(message, media_type)
+            async with shop.sessions() as receipt_session, receipt_session.begin():
+                order = await receipt_session.get(Order, order_id, with_for_update=True)
+                if not order or order.user_id != user.id or order.status != "waiting_payment" or order.payment_method != "receipt":
+                    raise ShopError("missing")
+                attempts = await receipt_session.scalar(select(func.count()).select_from(PaymentReceipt).where(PaymentReceipt.order_id == order.id))
+                pending = await receipt_session.scalar(select(PaymentReceipt.id).where(
+                    PaymentReceipt.order_id == order.id, PaymentReceipt.status.in_(("analyzing", "manual_review"))).limit(1))
+                if pending or attempts >= 2:
+                    await message.answer("Квитанція вже перевіряється або вичерпано ліміт спроб."
+                                         if lang == "ua" else "Квитанция уже проверяется или исчерпан лимит попыток.")
+                    return
+                fingerprint = hashlib.sha256(media.file_unique_id.encode()).hexdigest()
+                if await receipt_session.scalar(select(PaymentReceipt.id).where(PaymentReceipt.file_sha256 == fingerprint)):
+                    await message.answer("Цей файл уже використовувався." if lang == "ua" else "Этот файл уже использовался.")
+                    return
+                receipt = PaymentReceipt(order_id=order.id, user_id=user.id,
+                    telegram_file_id=media.file_id, file_sha256=fingerprint, status="rejected",
+                    analysis={"upload_type": media_type}, reason="Не вдалося розпізнати скриншот")
+                receipt_session.add(receipt)
+                await receipt_session.flush()
+                receipt_id = receipt.id
+            await message.answer(
+                "Не вдалося розпізнати скриншот." if lang == "ua" else "Не удалось распознать скрин.",
+                reply_markup=keyboard([[("🧑‍💻 Передати на розгляд адміну" if lang == "ua"
+                    else "🧑‍💻 Передать на рассмотрение админу", f"receipt_manual:{receipt_id}")]]),
+            )
             return
         photo = message.photo[-1]
         if photo.file_size and photo.file_size > 8 * 1024 * 1024:
@@ -2057,7 +2111,9 @@ def create_dispatcher(shop, storage):
             await render(
                 callback,
                 text,
-                [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))], back(lang, return_target)],
+                [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))]]
+                + await reviews_and_thanks_rows(session, lang, purchase=True)
+                + [back(lang, return_target)],
             )
             return
         if order.delivery_mode_snapshot == "manual":
@@ -2066,8 +2122,7 @@ def create_dispatcher(shop, storage):
                 manual_delivery_text(order, lang),
                 [
                     [(tr("support", lang), "https://t.me/" + support.lstrip("@"))],
-                    back(lang, return_target),
-                ],
+                ] + await reviews_and_thanks_rows(session, lang, purchase=True) + [back(lang, return_target)],
             )
             return
         code_limit = await effective_code_limit(session, product)
@@ -2091,19 +2146,23 @@ def create_dispatcher(shop, storage):
             and product.code_window_hours
             and aware(first_code_at) + timedelta(hours=product.code_window_hours) <= now()
         )
+        rows = purchase_rows(
+            order,
+            lang,
+            support,
+            gmail_connected,
+            remaining_codes,
+            code_request_available=remaining_codes > 0 and not code_window_expired,
+            code_window_expired=code_window_expired,
+            return_target=return_target,
+        )[:-1] + await reviews_and_thanks_rows(session, lang, purchase=True) + [back(lang, return_target)]
+        first = rows[:1] if rows[0][0][1].startswith("code:") or rows[0][0][1] == "noop" else []
+        buttons = [button for row in rows[len(first):] for button in row]
+        rows = first + [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         await render(
             callback,
             purchase_text(order, product, lang, shop.vault),
-            purchase_rows(
-                order,
-                lang,
-                support,
-                gmail_connected,
-                remaining_codes,
-                code_request_available=remaining_codes > 0 and not code_window_expired,
-                code_window_expired=code_window_expired,
-                return_target=return_target,
-            ),
+            rows,
         )
 
     async def deliver_code(callback, session, shop, user, lang, order_id, source):

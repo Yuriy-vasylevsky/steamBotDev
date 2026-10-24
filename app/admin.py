@@ -19,6 +19,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, or_, select
 
 from app.access import admin_ids, is_admin, is_primary_admin
+from app.database_restore import pg_command, restore_backup, validate_backup
 from app.i18n import money, tr
 from app.mailboxes import (
     credentials_for_product,
@@ -93,6 +94,8 @@ class Form(StatesGroup):
     receipt_example_photo = State()
     referral_promo = State()
     mail_search = State()
+    database_upload = State()
+    database_confirm = State()
 
 
 FIELDS = [
@@ -415,10 +418,10 @@ def admin_router():
             event,
             "⚙️ <b>Загальні налаштування</b>",
             [
-                [("👥 Користувачі", "a:users:0"), ("📊 Статистика", "a:stats")],
+                [("👥 Користувачі", "a:users:0"), ("🔥 Головна сторінка", "a:featured:0")],
                 [("💳 Режим оплати", "a:payment_mode"), ("💳 Керування картками", "a:cards")],
                 [("🎁 Програма лояльності", "a:loyalty")],
-                [("🎟 Промокоди", "a:promos:0"), ("👥 Реф система", "a:referral_settings")],
+                [("📢 Розсилка", "a:broadcast"), ("👥 Реф система", "a:referral_settings")],
                 [
                     (
                         "🔥 Розпродаж −50%: ВКЛ" if sale_enabled else "🏷 Розпродаж −50%: ВИКЛ",
@@ -426,7 +429,7 @@ def admin_router():
                     )
                 ],
                 [
-                    ("🧾 Історія замовлень", "a:recent_orders:today:0"),
+                    ("💬 Відгуки", "a:reviews:0"),
                     ("⚙️ Налаштування", "a:settings"),
                 ],
                 BACK,
@@ -434,9 +437,10 @@ def admin_router():
         )
 
     @router.callback_query(F.data.regexp(r"^a:recent_orders:(?:(?:today|yesterday):)?\d+$"))
+    @router.message(F.text == "🧾 Історія замовлень")
     async def recent_orders(callback, session, shop):
         page_size = 7
-        parts = callback.data.split(":")
+        parts = callback.data.split(":") if hasattr(callback, "data") else ["a", "recent_orders", "today", "0"]
         day = parts[2] if len(parts) == 4 else "today"
         page = int(parts[-1])
         timezone = ZoneInfo(getattr(shop.cfg, "timezone", "Europe/Kyiv"))
@@ -448,7 +452,11 @@ def admin_router():
         query = (
             select(Order, User)
             .join(User, User.id == Order.user_id)
-            .where(Order.created_at >= period_start, Order.created_at < period_end)
+            .where(
+                Order.created_at >= period_start,
+                Order.created_at < period_end,
+                Order.status.in_(SUCCESS),
+            )
         )
         total = await session.scalar(select(func.count()).select_from(query.subquery()))
         page = min(page, max(0, (total - 1) // page_size))
@@ -603,10 +611,11 @@ def admin_router():
         await order_request_settings(callback, state, session)
 
     @router.callback_query(F.data.regexp(r"^a:promos:\d+$"))
+    @router.message(F.text == "🎟 Промокоди")
     async def promos(callback, state, session):
         await state.clear()
         reward_promos_enabled = await setting(session, "cart_reward_promos_enabled", "true") == "true"
-        page_value = callback.data.rsplit(":", 1)[1]
+        page_value = callback.data.rsplit(":", 1)[1] if hasattr(callback, "data") else "0"
         page = min(int(page_value), 100000) if page_value.isdigit() else 0
         query = select(PromoCode).where(
             PromoCode.created_by == callback.from_user.id,
@@ -2549,6 +2558,7 @@ def admin_router():
             ),
             ("📌 Замовити товар", "a:order_request_settings"),
             ("🗄️ Резервна копія", "a:download_database"),
+            ("📤 Завантажити БД", "a:upload_database"),
             ("🟢 Магазин" if enabled == "true" else "🔴 Магазин", "a:enabled"),
         ]
         await render(
@@ -2912,6 +2922,83 @@ def admin_router():
             "✅ Приклад квитанції прибрано. Покупці знову бачитимуть звичайний текст.",
             [[("⬅️ До прикладу квитанції", "a:receipt_example_settings")], GENERAL_BACK],
         )
+
+    @router.callback_query(F.data == "a:upload_database")
+    async def upload_database(callback, state, shop):
+        if not is_primary_admin(shop.cfg, callback.from_user.id):
+            await callback.message.answer("Відновлення БД доступне лише головному адміністратору.")
+            return
+        await state.clear()
+        await state.set_state(Form.database_upload)
+        await render(callback,
+            "📤 Надішліть резервну копію .dump, завантажену з цього бота.\n\n"
+            "⚠️ Відновлення замінить усі поточні дані. Копія повинна мати ту саму версію БД "
+            "і той самий ключ шифрування ENCRYPTION_KEY. Перед заміною ви отримаєте копію поточної БД.",
+            [[("❌ Скасувати", "a:restore_cancel")]])
+
+    @router.callback_query(F.data == "a:restore_cancel")
+    async def restore_cancel(callback, state):
+        await state.clear()
+        await render(callback, "Відновлення скасовано.", [[("⚙️ Налаштування", "a:settings")]])
+
+    @router.message(Form.database_upload)
+    async def database_upload_file(message, state, shop):
+        if not is_primary_admin(shop.cfg, message.from_user.id):
+            return
+        document = message.document
+        if not document or not (document.file_name or "").endswith(".dump"):
+            await message.answer("Надішліть файл резервної копії з розширенням .dump.")
+            return
+        if not document.file_size or document.file_size > 19 * 1024 * 1024:
+            await message.answer("Максимальний розмір резервної копії через бота — 19 МБ.")
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="steamsell-check-") as directory:
+                path = Path(directory) / "upload.dump"
+                await message.bot.download(document, destination=path)
+                await validate_backup(path)
+        except (ValueError, OSError, TimeoutError):
+            await message.answer("Файл пошкоджений, не є копією цього магазину або має іншу версію БД. Поточну БД не змінено.")
+            return
+        token = secrets.token_hex(8)
+        await state.set_state(Form.database_confirm)
+        await state.set_data({"restore_file": document.file_id, "restore_token": token})
+        await message.answer("⚠️ Файл перевірено. Замінити всі поточні дані цією копією? "
+            "Продовжуйте лише якщо копія використовує поточний ENCRYPTION_KEY.",
+            reply_markup=keyboard([[("✅ Замінити БД", "a:restore_confirm:" + token)],
+                                   [("❌ Скасувати", "a:restore_cancel")]]))
+
+    @router.callback_query(F.data.startswith("a:restore_confirm:"))
+    async def database_restore_confirm(callback, state, session, shop):
+        if not is_primary_admin(shop.cfg, callback.from_user.id):
+            return
+        data = await state.get_data()
+        if not data.get("restore_file") or data.get("restore_token") != callback.data.rsplit(":", 1)[1]:
+            await callback.message.answer("Підтвердження застаріло. Завантажте копію ще раз.")
+            return
+        async with shop.redis.lock("database_restore", timeout=900, blocking_timeout=1):
+            if (await state.get_data()).get("restore_token") != data["restore_token"]:
+                return
+            await state.clear()
+            shop.database_restoring = True
+            await session.rollback()
+            try:
+                with tempfile.TemporaryDirectory(prefix="steamsell-restore-") as directory:
+                    source = Path(directory) / "upload.dump"
+                    backup = Path(directory) / "before-restore.dump"
+                    await callback.bot.download(data["restore_file"], destination=source)
+                    await validate_backup(source)
+                    await pg_command("pg_dump", "--format=custom", "--no-owner", "--no-privileges",
+                        "--file=" + str(backup), database_url=shop.cfg.database_url)
+                    await callback.message.answer_document(FSInputFile(backup, filename="steamsell-before-restore.dump"),
+                        caption="Резервна копія перед заміною БД. Збережіть цей файл.", protect_content=True)
+                    await callback.message.answer("Відновлюю БД. Дочекайтеся результату.")
+                    await restore_backup(source, shop.cfg.database_url)
+                    await callback.message.answer("✅ БД відновлено. Відкрийте /admin заново.")
+            except (ValueError, OSError, TimeoutError):
+                await callback.message.answer("❌ Відновлення не завершено. Якщо заміна БД почалася, PostgreSQL відкотив її автоматично. Спробуйте завантажити файл ще раз.")
+            finally:
+                shop.database_restoring = False
 
     @router.callback_query(F.data == "a:download_database")
     async def download_database(callback, session, shop):
