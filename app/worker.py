@@ -67,7 +67,7 @@ async def deliver_one(shop, bot):
         support = await setting(session, "support_username", shop.cfg.support_username)
         if order.delivery_mode_snapshot == "manual":
             text = manual_delivery_text(order, lang)
-            markup = keyboard([[(tr("support", lang), "https://t.me/" + support.lstrip("@"))]])
+            rows = [[(tr("support", lang), "https://t.me/" + support.lstrip("@"))]]
         else:
             code_limit = await effective_code_limit(session, product)
             gmail_connected = bool(
@@ -76,8 +76,7 @@ async def deliver_one(shop, bot):
                 and code_request_window_open(order)
             )
             text = purchase_text(order, product, lang, shop.vault)
-            markup = keyboard(
-                purchase_rows(
+            rows = purchase_rows(
                     order,
                     lang,
                     support,
@@ -86,7 +85,18 @@ async def deliver_one(shop, bot):
                     code_request_available=code_request_window_open(order),
                     return_target=f"purchase:{order.id}",
                 )
-            )
+        # Include the same feedback actions in the initial delivery message.
+        feedback = []
+        if await setting(session, "reviews_enabled", "true") == "true":
+            feedback.append((tr("leave_review", lang), "account:reviews:0"))
+        feedback.append((tr("admin_thanks", lang), "account:admin_thanks"))
+        if order.delivery_mode_snapshot == "manual":
+            rows.append(feedback)
+        else:
+            rows = rows[:-1] + [feedback] + rows[-1:]
+        first = rows[:1] if rows[0][0][1].startswith("code:") or rows[0][0][1] == "noop" else []
+        buttons = [button for row in rows[len(first):] for button in row]
+        markup = keyboard(first + [buttons[index:index + 2] for index in range(0, len(buttons), 2)])
     try:
         message = await bot.send_message(user.id, text, parse_mode="HTML", reply_markup=markup)
     except TelegramRetryAfter as error:
