@@ -163,8 +163,8 @@ def purchase_text(order, product, lang, vault):
         paid_at = paid_at.replace(tzinfo=UTC)
     paid_at = paid_at.astimezone(ZoneInfo("Europe/Kyiv"))
     try:
-        login = escape(vault.decrypt(product.steam_login_encrypted))
-        password = escape(vault.decrypt(product.steam_password_encrypted))
+        login = escape(vault.decrypt(order.steam_login_encrypted))
+        password = escape(vault.decrypt(order.steam_password_encrypted))
         credentials = (
             f"🔐 <b>{'Дані акаунта' if lang == 'ua' else 'Данные аккаунта'}</b>\n"
             f"👤 {'Логін' if lang == 'ua' else 'Логин'}: <code>{login}</code>\n"

@@ -53,6 +53,8 @@ async def shop(tmp_path):
                 product_id=1,
                 price_snapshot=49900,
                 product_name_snapshot="Original",
+                steam_login_encrypted=vault.encrypt("test_account"),
+                steam_password_encrypted=vault.encrypt("password<&>"),
                 mono_invoice_id="invoice1",
             )
         )

@@ -524,6 +524,8 @@ class Shop:
                 tip_percent_snapshot=tip_percent,
                 delivery_mode_snapshot=product.delivery_mode,
                 activation_type_snapshot=product.activation_type,
+                steam_login_encrypted=product.steam_login_encrypted,
+                steam_password_encrypted=product.steam_password_encrypted,
                 payment_method="free" if free_order else target_method,
                 status="delivered" if free_order else "waiting_payment",
                 paid_at=completed_at,
@@ -684,6 +686,8 @@ class Shop:
                     tip_percent_snapshot=tip_percent,
                     delivery_mode_snapshot=product.delivery_mode,
                     activation_type_snapshot=product.activation_type,
+                    steam_login_encrypted=product.steam_login_encrypted,
+                    steam_password_encrypted=product.steam_password_encrypted,
                     payment_method=target_method,
                     checkout_id=checkout_id,
                     status="paid" if free_checkout else "waiting_payment",
@@ -907,7 +911,7 @@ class Shop:
                 )
                 result = await self.gmail.latest_code(
                     credentials,
-                    self.vault.decrypt(product.steam_login_encrypted),
+                    self.vault.decrypt(order.steam_login_encrypted),
                     earliest,
                     search_settings,
                 )
@@ -930,7 +934,7 @@ class Shop:
                     # last ten minutes so the buyer can retry it.
                     fallback = await self.gmail.latest_code(
                         credentials,
-                        self.vault.decrypt(product.steam_login_encrypted),
+                        self.vault.decrypt(order.steam_login_encrypted),
                         max(
                             now()
                             - timedelta(minutes=min(10, search_settings["max_age_minutes"])),

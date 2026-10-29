@@ -117,6 +117,8 @@ class Order(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     product_name_snapshot: Mapped[str] = mapped_column(String(150))
+    steam_login_encrypted: Mapped[str | None] = mapped_column(Text)
+    steam_password_encrypted: Mapped[str | None] = mapped_column(Text)
     price_snapshot: Mapped[int] = mapped_column(Integer)
     original_price_snapshot: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     discount_percent_snapshot: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
